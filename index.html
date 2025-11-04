@@ -62,6 +62,7 @@
       const [status, setStatus] = useState(null);
       const [webhookUrl, setWebhookUrl] = useState('');
       const [isConfiguring, setIsConfiguring] = useState(true);
+      const [recentSubmissions, setRecentSubmissions] = useState([]);
 
       useEffect(() => {
         // Load saved webhook URL
@@ -71,6 +72,18 @@
             if (savedUrl) {
               setWebhookUrl(savedUrl);
               setIsConfiguring(false);
+            }
+            
+            // Load recent submissions
+            const savedSubmissions = await window.Missive.storeGet('recent_submissions');
+            if (savedSubmissions) {
+              const submissions = JSON.parse(savedSubmissions);
+              // Filter to only keep submissions from last 10 minutes
+              const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+              const recentOnes = submissions.filter(sub => sub.timestamp > tenMinutesAgo);
+              setRecentSubmissions(recentOnes);
+              // Save filtered list back
+              await window.Missive.storeSet('recent_submissions', JSON.stringify(recentOnes));
             }
           } catch (err) {
             console.log('No saved webhook URL');
@@ -88,6 +101,11 @@
               setConversationId(conv.id);
               setConversationSubject(conv.subject || 'No subject');
               setStatus(null);
+              
+              // Check if this conversation was recently submitted
+              const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+              const recentSubs = recentSubmissions.filter(sub => sub.timestamp > tenMinutesAgo);
+              setRecentSubmissions(recentSubs);
             } catch (err) {
               console.error('Error fetching conversation:', err);
             }
@@ -120,7 +138,8 @@
           const response = await fetch(webhookUrl, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json',
+              'Content-Type': 'application/json'
+              // Authorization temporarily removed for testing
             },
             body: JSON.stringify({
               conversation: {
@@ -132,9 +151,20 @@
           });
 
           if (response.ok) {
-            setStatus({ type: 'success', message: 'Draft generation started!' });
+            setStatus({ type: 'success', message: 'Draft generation started successfully!' });
+            
+            // Add to recent submissions
+            const newSubmission = {
+              conversationId,
+              timestamp: Date.now()
+            };
+            const updatedSubmissions = [...recentSubmissions, newSubmission];
+            setRecentSubmissions(updatedSubmissions);
+            
+            // Save to storage
+            await window.Missive.storeSet('recent_submissions', JSON.stringify(updatedSubmissions));
           } else {
-            setStatus({ type: 'error', message: 'Webhook failed. Check your endpoint.' });
+            setStatus({ type: 'error', message: `Webhook failed with status ${response.status}` });
           }
         } catch (err) {
           setStatus({ type: 'error', message: 'Network error. Is your endpoint accessible?' });
@@ -180,7 +210,9 @@
               </p>
               <pre className="text-xs mt-2 text-blue-800 overflow-x-auto">
 {`{
-  "conversationId": "uuid",
+  "conversation": {
+    "id": "uuid"
+  },
   "subject": "Re: ...",
   "timestamp": "ISO 8601"
 }`}
@@ -189,6 +221,17 @@
           </div>
         );
       }
+
+      // Check if current conversation was recently submitted
+      const wasRecentlySubmitted = recentSubmissions.some(
+        sub => sub.conversationId === conversationId
+      );
+      const lastSubmission = recentSubmissions.find(
+        sub => sub.conversationId === conversationId
+      );
+      const minutesAgo = lastSubmission 
+        ? Math.floor((Date.now() - lastSubmission.timestamp) / 60000)
+        : null;
 
       return (
         <div className="p-4 space-y-4">
@@ -222,6 +265,18 @@
                   {conversationId}
                 </p>
               </div>
+
+              {wasRecentlySubmitted && (
+                <div className="p-3 bg-green-50 border border-green-200 rounded-md">
+                  <p className="text-sm text-green-800 font-medium flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" />
+                    Already Submitted
+                  </p>
+                  <p className="text-xs text-green-600 mt-1">
+                    Draft request sent {minutesAgo} {minutesAgo === 1 ? 'minute' : 'minutes'} ago
+                  </p>
+                </div>
+              )}
 
               <button
                 onClick={generateDraft}
