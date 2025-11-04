@@ -31,6 +31,28 @@
       console.error('Window error:', e.error || e.message);
     });
 
+    // Safe Missive storage helpers (handle both sync/async implementations)
+    const safeStoreSet = async (key, value) => {
+      try {
+        if (!window.Missive?.storeSet) return;
+        const res = window.Missive.storeSet(key, value);
+        if (res && typeof res.then === 'function') await res; // only await if it's a Promise
+      } catch (e) {
+        console.log('storeSet failed:', e);
+      }
+    };
+
+    const safeStoreGet = async (key) => {
+      try {
+        if (!window.Missive?.storeGet) return null;
+        const res = window.Missive.storeGet(key);
+        return (res && typeof res.then === 'function') ? await res : res;
+      } catch (e) {
+        console.log('storeGet failed:', e);
+        return null;
+      }
+    };
+
     // Error Boundary component
     class ErrorBoundary extends React.Component {
       constructor(props) {
@@ -140,7 +162,7 @@
       useEffect(() => {
         const loadConfig = async () => {
           try {
-            const savedUrl = await window.Missive.storeGet('webhook_url');
+            const savedUrl = await safeStoreGet('webhook_url');
             if (savedUrl) {
               setWebhookUrl(savedUrl);
               setIsConfiguring(false);
@@ -150,13 +172,13 @@
           }
 
           try {
-            const saved = await window.Missive.storeGet('recent_submissions');
+            const saved = await safeStoreGet('recent_submissions');
             if (saved) {
               const parsed = JSON.parse(saved);
               const now = Date.now();
               const pruned = parsed.filter((s) => now - s.timestamp < TEN_MIN_MS);
               setRecentSubmissions(pruned);
-              await window.Missive.storeSet('recent_submissions', JSON.stringify(pruned));
+              await safeStoreSet('recent_submissions', JSON.stringify(pruned));
             }
           } catch (err) {
             console.log('No saved submissions');
@@ -208,11 +230,7 @@
           const pruned = recentRef.current.filter((s) => now - s.timestamp < TEN_MIN_MS);
           if (pruned.length !== recentRef.current.length) {
             setRecentSubmissions(pruned);
-            try {
-              await window.Missive.storeSet('recent_submissions', JSON.stringify(pruned));
-            } catch (err) {
-              console.log('Failed to save pruned submissions');
-            }
+            await safeStoreSet('recent_submissions', JSON.stringify(pruned));
           }
         }, 30 * 1000); // Every 30 seconds
 
@@ -257,7 +275,7 @@
 
       const saveWebhookUrl = async () => {
         try {
-          await window.Missive.storeSet('webhook_url', webhookUrl);
+          await safeStoreSet('webhook_url', webhookUrl);
           setIsConfiguring(false);
           setStatus({ type: 'success', message: 'Webhook URL saved!' });
           setTimeout(() => setStatus(null), 2000);
@@ -297,7 +315,7 @@
                 }
               }
               const deduped = Array.from(map.values());
-              window.Missive.storeSet('recent_submissions', JSON.stringify(deduped)).catch(() => {});
+              safeStoreSet('recent_submissions', JSON.stringify(deduped));
               return deduped;
             });
           } else {
