@@ -61,6 +61,7 @@
       const [isLoading, setIsLoading] = useState(false);
       const [status, setStatus] = useState(null);
       const [webhookUrl, setWebhookUrl] = useState('');
+      const [authToken, setAuthToken] = useState('');
       const [isConfiguring, setIsConfiguring] = useState(true);
 
       useEffect(() => {
@@ -68,12 +69,14 @@
         const loadConfig = async () => {
           try {
             const savedUrl = await window.Missive.storeGet('webhook_url');
-            if (savedUrl) {
+            const savedToken = await window.Missive.storeGet('auth_token');
+            if (savedUrl && savedToken) {
               setWebhookUrl(savedUrl);
+              setAuthToken(savedToken);
               setIsConfiguring(false);
             }
           } catch (err) {
-            console.log('No saved webhook URL');
+            console.log('No saved configuration');
           }
         };
 
@@ -102,11 +105,12 @@
       const saveWebhookUrl = async () => {
         try {
           await window.Missive.storeSet('webhook_url', webhookUrl);
+          await window.Missive.storeSet('auth_token', authToken);
           setIsConfiguring(false);
-          setStatus({ type: 'success', message: 'Webhook URL saved!' });
+          setStatus({ type: 'success', message: 'Configuration saved!' });
           setTimeout(() => setStatus(null), 2000);
         } catch (err) {
-          setStatus({ type: 'error', message: 'Failed to save URL' });
+          setStatus({ type: 'error', message: 'Failed to save configuration' });
         }
       };
 
@@ -121,6 +125,7 @@
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'Authorization': `Bearer ${authToken}`
             },
             body: JSON.stringify({
               conversation: {
@@ -149,7 +154,7 @@
             <div className="space-y-2">
               <h2 className="text-lg font-semibold text-gray-900">Setup Autodraft</h2>
               <p className="text-sm text-gray-600">
-                Enter your webhook endpoint URL to receive autodraft requests.
+                Configure your webhook endpoint and authentication token.
               </p>
             </div>
 
@@ -166,9 +171,25 @@
               />
             </div>
 
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-gray-700">
+                Authorization Token
+              </label>
+              <input
+                type="password"
+                value={authToken}
+                onChange={(e) => setAuthToken(e.target.value)}
+                placeholder="Your Bearer token"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <p className="text-xs text-gray-500">
+                Generate in PowerShell: <code className="bg-gray-100 px-1 rounded">[guid]::NewGuid()</code>
+              </p>
+            </div>
+
             <button
               onClick={saveWebhookUrl}
-              disabled={!webhookUrl}
+              disabled={!webhookUrl || !authToken}
               className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
             >
               Save & Continue
