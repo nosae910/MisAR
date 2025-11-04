@@ -23,6 +23,40 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+    // Error handlers for unhandled rejections and errors
+    window.addEventListener('unhandledrejection', (e) => {
+      console.error('Unhandled promise rejection:', e.reason);
+    });
+    window.addEventListener('error', (e) => {
+      console.error('Window error:', e.error || e.message);
+    });
+
+    // Error Boundary component
+    class ErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { error: null };
+      }
+      static getDerivedStateFromError(error) {
+        return { error };
+      }
+      componentDidCatch(error, info) {
+        console.error('Integration crashed:', error, info);
+      }
+      render() {
+        if (this.state.error) {
+          return (
+            <div className="p-4 text-sm bg-red-50 text-red-800 rounded">
+              <div className="font-semibold mb-1">Autodraft crashed</div>
+              <div className="font-mono whitespace-pre-wrap">{String(this.state.error)}</div>
+              <div className="text-xs mt-2 opacity-70">See console for stack trace</div>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
+
     // Lucide icons as inline SVG components
     const Loader2 = ({ className }) => (
       <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -79,6 +113,29 @@
         recentRef.current = recentSubmissions; 
       }, [recentSubmissions]);
 
+      // Ask Missive to resize the iframe when content changes
+      useEffect(() => {
+        try { window.Missive?.resize?.(); } catch {}
+      }, [
+        isConfiguring,
+        status?.type,
+        status?.message,
+        isLoading,
+        conversationId,
+        recentSubmissions.length
+      ]);
+
+      // After submit, resize a few times while the progress bar animates
+      useEffect(() => {
+        if (!status) return;
+        let ticks = 0;
+        const t = setInterval(() => {
+          try { window.Missive?.resize?.(); } catch {}
+          if (++ticks > 6) clearInterval(t);
+        }, 500);
+        return () => clearInterval(t);
+      }, [status?.type]);
+
       // Load config + submissions on mount
       useEffect(() => {
         const loadConfig = async () => {
@@ -111,7 +168,7 @@
         // Initialize current conversation on load
         (async () => {
           try {
-            const ids = await window.Missive.getSelectedConversations?.();
+            const ids = (await window.Missive.getSelectedConversations?.()) || [];
             if (Array.isArray(ids) && ids.length === 1) {
               const conversations = await window.Missive.fetchConversations(ids);
               const conv = conversations[0];
@@ -119,7 +176,7 @@
               setConversationSubject(conv.subject || 'No subject');
             }
           } catch (err) {
-            console.log('Could not get initial conversation');
+            console.log('Could not get initial conversation:', err);
           }
         })();
 
@@ -409,7 +466,12 @@
     };
 
     // Render the app
-    ReactDOM.render(<MissiveAutodraft />, document.getElementById('root'));
+    ReactDOM.render(
+      <ErrorBoundary>
+        <MissiveAutodraft />
+      </ErrorBoundary>,
+      document.getElementById('root')
+    );
   </script>
 </body>
 </html>
