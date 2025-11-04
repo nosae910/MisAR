@@ -21,7 +21,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     // Lucide icons as inline SVG components
     const Loader2 = ({ className }) => (
@@ -55,6 +55,15 @@
       </svg>
     );
 
+    const TEN_MIN_MS = 10 * 60 * 1000;
+
+    function isSubmittedRecently(conversationId, list) {
+      const now = Date.now();
+      return list.some(
+        (s) => s.conversationId === conversationId && now - s.timestamp < TEN_MIN_MS
+      );
+    }
+
     const MissiveAutodraft = () => {
       const [conversationId, setConversationId] = useState(null);
       const [conversationSubject, setConversationSubject] = useState('');
@@ -64,8 +73,14 @@
       const [isConfiguring, setIsConfiguring] = useState(true);
       const [recentSubmissions, setRecentSubmissions] = useState([]);
 
+      // Keep a ref so Missive event handlers always see latest recentSubmissions
+      const recentRef = useRef(recentSubmissions);
+      useEffect(() => { 
+        recentRef.current = recentSubmissions; 
+      }, [recentSubmissions]);
+
+      // Load config + submissions on mount
       useEffect(() => {
-        // Load saved webhook URL
         const loadConfig = async () => {
           try {
             const savedUrl = await window.Missive.storeGet('webhook_url');
@@ -73,41 +88,55 @@
               setWebhookUrl(savedUrl);
               setIsConfiguring(false);
             }
-            
-            // Load recent submissions
-            const savedSubmissions = await window.Missive.storeGet('recent_submissions');
-            if (savedSubmissions) {
-              const submissions = JSON.parse(savedSubmissions);
-              // Filter to only keep submissions from last 10 minutes
-              const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-              const recentOnes = submissions.filter(sub => sub.timestamp > tenMinutesAgo);
-              setRecentSubmissions(recentOnes);
-              // Save filtered list back
-              await window.Missive.storeSet('recent_submissions', JSON.stringify(recentOnes));
-            }
           } catch (err) {
             console.log('No saved webhook URL');
+          }
+
+          try {
+            const saved = await window.Missive.storeGet('recent_submissions');
+            if (saved) {
+              const parsed = JSON.parse(saved);
+              const now = Date.now();
+              const pruned = parsed.filter((s) => now - s.timestamp < TEN_MIN_MS);
+              setRecentSubmissions(pruned);
+              await window.Missive.storeSet('recent_submissions', JSON.stringify(pruned));
+            }
+          } catch (err) {
+            console.log('No saved submissions');
           }
         };
 
         loadConfig();
 
+        // Initialize current conversation on load
+        (async () => {
+          try {
+            const ids = await window.Missive.getSelectedConversations?.();
+            if (Array.isArray(ids) && ids.length === 1) {
+              const conversations = await window.Missive.fetchConversations(ids);
+              const conv = conversations[0];
+              setConversationId(conv.id);
+              setConversationSubject(conv.subject || 'No subject');
+            }
+          } catch (err) {
+            console.log('Could not get initial conversation');
+          }
+        })();
+
         // Listen for conversation changes
-        window.Missive.on('change:conversations', async (ids) => {
+        const off = window.Missive.on('change:conversations', async (ids) => {
           if (ids.length === 1) {
             try {
               const conversations = await window.Missive.fetchConversations(ids);
               const conv = conversations[0];
               setConversationId(conv.id);
               setConversationSubject(conv.subject || 'No subject');
-              setStatus(null);
-              
-              // Check if this conversation was recently submitted
-              const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-              const recentSubs = recentSubmissions.filter(sub => sub.timestamp > tenMinutesAgo);
-              setRecentSubmissions(recentSubs);
+              // Status will be set by the effect below
             } catch (err) {
               console.error('Error fetching conversation:', err);
+              setConversationId(null);
+              setConversationSubject('');
+              setStatus(null);
             }
           } else {
             setConversationId(null);
@@ -115,6 +144,58 @@
             setStatus(null);
           }
         });
+
+        // Periodic pruning so banners auto-expire
+        const interval = setInterval(async () => {
+          const now = Date.now();
+          const pruned = recentRef.current.filter((s) => now - s.timestamp < TEN_MIN_MS);
+          if (pruned.length !== recentRef.current.length) {
+            setRecentSubmissions(pruned);
+            try {
+              await window.Missive.storeSet('recent_submissions', JSON.stringify(pruned));
+            } catch (err) {
+              console.log('Failed to save pruned submissions');
+            }
+          }
+        }, 30 * 1000); // Every 30 seconds
+
+        return () => {
+          try { off && off(); } catch {}
+          clearInterval(interval);
+        };
+      }, []);
+
+      // Recompute status whenever the conversation or the recent list changes
+      useEffect(() => {
+        if (!conversationId) {
+          setStatus(null);
+          return;
+        }
+        
+        if (isSubmittedRecently(conversationId, recentSubmissions)) {
+          const submission = recentSubmissions.find(s => s.conversationId === conversationId);
+          const minutesAgo = Math.floor((Date.now() - submission.timestamp) / 60000);
+          setStatus({
+            type: 'submitted',
+            message: minutesAgo === 0 
+              ? 'Draft request sent just now'
+              : `Draft request sent ${minutesAgo} ${minutesAgo === 1 ? 'minute' : 'minutes'} ago`
+          });
+        } else {
+          // Only clear if we were showing the submitted banner
+          setStatus((prev) =>
+            prev && prev.type === 'submitted' ? null : prev
+          );
+        }
+      }, [conversationId, recentSubmissions]);
+
+      // Live "minutes ago" updates - trigger a re-render every 30s to refresh the text
+      useEffect(() => {
+        const tick = setInterval(() => {
+          // Only update if we're currently showing the submitted banner
+          setStatus(prev => (prev && prev.type === 'submitted' ? { ...prev } : prev));
+        }, 30_000);
+        return () => clearInterval(tick);
       }, []);
 
       const saveWebhookUrl = async () => {
@@ -137,32 +218,31 @@
         try {
           const response = await fetch(webhookUrl, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-              // Authorization temporarily removed for testing
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              conversation: {
-                id: conversationId
-              },
-              subject: conversationSubject,
+              conversation: { id: conversationId },
               timestamp: new Date().toISOString(),
             }),
           });
 
           if (response.ok) {
             setStatus({ type: 'success', message: 'Draft generation started successfully!' });
-            
-            // Add to recent submissions
-            const newSubmission = {
-              conversationId,
-              timestamp: Date.now()
-            };
-            const updatedSubmissions = [...recentSubmissions, newSubmission];
-            setRecentSubmissions(updatedSubmissions);
-            
-            // Save to storage
-            await window.Missive.storeSet('recent_submissions', JSON.stringify(updatedSubmissions));
+
+            // Use functional update with de-duplication
+            setRecentSubmissions((prev) => {
+              const next = [...prev, { conversationId, timestamp: Date.now() }];
+              // Keep newest per conversationId
+              const map = new Map();
+              for (const s of next) {
+                const curr = map.get(s.conversationId);
+                if (!curr || s.timestamp > curr.timestamp) {
+                  map.set(s.conversationId, s);
+                }
+              }
+              const deduped = Array.from(map.values());
+              window.Missive.storeSet('recent_submissions', JSON.stringify(deduped)).catch(() => {});
+              return deduped;
+            });
           } else {
             setStatus({ type: 'error', message: `Webhook failed with status ${response.status}` });
           }
@@ -213,7 +293,6 @@
   "conversation": {
     "id": "uuid"
   },
-  "subject": "Re: ...",
   "timestamp": "ISO 8601"
 }`}
               </pre>
@@ -295,6 +374,17 @@
                       <p className="text-sm font-medium mb-1">Already Submitted</p>
                     )}
                     <p className="text-sm">{status.message}</p>
+                    {status.type === 'submitted' && (() => {
+                      const submission = recentSubmissions.find(s => s.conversationId === conversationId);
+                      if (!submission) return null;
+                      const elapsed = Date.now() - submission.timestamp;
+                      const pct = Math.max(0, Math.min(100, 100 - (elapsed / TEN_MIN_MS) * 100));
+                      return (
+                        <div className="h-1 w-full bg-green-100 rounded mt-2">
+                          <div className="h-1 bg-green-500 rounded transition-all duration-1000" style={{ width: `${pct}%` }} />
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               )}
